@@ -5,14 +5,30 @@ from flask import request, jsonify
 from app.models import *
 import re
 from datetime import datetime
-
 from app.static.enums import EntityTypes
 
+@app.route('/validate-new-user',methods=['GET'])
+def validate_user():
+    email = request.form.get('email')
+    username = request.form.get('username')
+    password = request.form.get('password')
+    
+    if not username or not password or not email:
+        return jsonify({"error": "Email,Username and password are required"}), 400
+    
+    validation_result = validate_new_user(email=email, username=username, password=password)
+
+    if validation_result is not None:
+        return validation_result
+    
+    return jsonify({"message": "User Validate Successfully"}), 200
+    
 @app.route('/register',methods=['POST'])
 def register_user():
     email = request.form.get('email')
     username = request.form.get('username')
     password = request.form.get('password')
+    device_token = request.form.get('device_token','')
 
     if not username or not password or not email:
         return jsonify({"error": "Email,Username and password are required"}), 400
@@ -28,7 +44,8 @@ def register_user():
         email=email,
         username=username,
         password=hash_password,
-        created_date=datetime.utcnow()
+        created_date=datetime.utcnow(),
+        device_token= device_token
     )
     db.session.add(user)
     db.session.commit()
@@ -118,18 +135,33 @@ def save_password_history(user_id,password_hash):
 
 @app.route('/login', methods=['POST'])
 def signin_user():
-    username = request.form.get('username')
-    password = request.form.get('password')
-    
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
+    try:
+        username = request.form.get('username')
+        password = request.form.get('password')
+        device_token = request.form.get('device_token')
+        
+        if not username or not password:
+            return jsonify({"error": "Username and password are required"}), 400
+        
+        if not device_token:
+            return jsonify({'error': 'Device token is required'}), 400
 
-    user = User.query.filter_by(username=username).first()
-    
-    if not user or not bcrypt.check_password_hash(user.password, password):
-        return jsonify({'error': 'Invalid username or password'}), 401
-    # login_user(user=user, remember=True)
-    return jsonify({'message': 'SignIn successful'}), 200
+        user = User.query.filter_by(username=username).first()
+        
+        if not user or not bcrypt.check_password_hash(user.password, password):
+            return jsonify({'error': 'Invalid username or password'}), 401
+        
+        existing_device_token = user.device_token
+
+        if not existing_device_token is None and not existing_device_token.strip() == '':
+            return jsonify({'error': 'User already logged in from another device'}), 400
+        
+        user.device_token = device_token
+        db.session.commit()
+        # login_user(user=user, remember=True)
+        return jsonify({'message': 'SignIn successful'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/user/get-loggedin-user/<string:username>', methods=['GET'])
 def get_loggedIn_user(username):
@@ -147,6 +179,66 @@ def get_loggedIn_user(username):
         'last_name': profile.last_name if profile else None,
         'email': user.email,
         'username': user.username,
-        'profile_picture': base64.b64encode(image.get_data()).decode('utf-8') if image else None
+        'profile_picture': base64.b64encode(image.get_data()).decode('utf-8') if image else None,
+        'device_token': user.device_token
     }
     return jsonify(user_details), 200
+
+@app.route('/user/check-existence/<string:username>', methods=['GET'])
+def check_user_existence(username):
+    if not username:
+        return jsonify({"error": "Username is required"}), 400
+
+    user = User.query.filter_by(username=username).first()
+
+    if user:
+        return jsonify({"exists": True, "email": user.email}), 200
+    else:
+        return jsonify({"exists": False}), 200
+    
+@app.route('/user/validate-current-password', methods=['GET'])
+def validate_current_password():
+    username = request.form.get('username')
+    curr_password = request.form.get('curr_password')
+    
+    if not curr_password:
+        return jsonify({"error": "Current password is required"}), 400
+
+    user = User.query.filter_by(username=username).first()
+    
+    if not user or not bcrypt.check_password_hash(user.password, curr_password):
+        return jsonify({'error': 'Invalid current password'}), 401
+    return jsonify({'message': 'Current password matched successfully'}), 200
+
+@app.route('/logout/<string:username>', methods=['PUT'])
+def logout_user(username):
+    try:
+        user = User.query.filter_by(username=username).first()
+        
+        if not user :
+            return jsonify({'error': 'User not found'}), 404
+        
+        if user.device_token is None or user.device_token.strip() == '':
+            return jsonify({'error': 'User already logged out'}), 400
+        
+        user.device_token = None
+        db.session.commit()
+        
+        return jsonify({'message':'Logged out successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def get_user_id_by_username(username):
+    if not username:
+        return None
+    user = User.query.filter_by(username = username).first()
+    if not user:
+        return None
+    return user.id
+
+def get_all_users():
+    try:
+        users = User.query.all()
+        return users
+    except Exception as e:
+        return []
